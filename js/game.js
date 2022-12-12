@@ -23,6 +23,9 @@ var projectilesInUse = [];
 var particlesPool = [];
 var particlesInUse = [];
 
+const apiPath = 'ws://localhost:3080/connect_client'
+var connection = null
+
 function resetGame() {
     game = {
         speed: 0,
@@ -95,8 +98,72 @@ function resetGame() {
         maxProjectile: 1,
 
         status: "playing",
+
+        pilot: "Pilot-000000"
     };
     fieldLevel.innerHTML = Math.floor(game.level);
+
+    try {
+        connection = new WebSocket(apiPath)
+
+        connection.addEventListener('message', (event) => {
+            msg = JSON.parse(event.data)
+            if (msg["type"] == "code") {
+                game.pilot = msg["code"]
+                document.getElementById("code").innerHTML = `${game.pilot}`
+                console.log("code: ", msg["code"])
+
+                connection.send(JSON.stringify({
+                    "content": `${game.pilot} has joined the race!`
+                }))
+            }
+
+            if (msg["type"] == "msg") {
+                console.log("msg: ", JSON.stringify(msg["data"]))
+                let newLog = ''
+                for (data of msg["data"]) {
+                    var s = new Date(data["created_time"] * 1000).toLocaleTimeString("en-US")
+                    newLog = newLog + `<div class="progress-unit">${s} ${data["pilot"]}: ${data["content"]}</div>`
+                }
+
+                document.getElementById("progress").innerHTML = newLog
+            }
+
+            if (msg["type"] == "rank") {
+                console.log("ranking: ", JSON.stringify(msg["data"]))
+                let newRank = ''
+                for (data of msg["data"]) {
+                    newRank = newRank + `<div class="ranking-unit">${data["pilot"]} - Score: ${data["score"]}</div>`
+                }
+
+                document.getElementById("ranking").innerHTML = newRank
+            }
+        })
+
+        connection.addEventListener('error', (event) => {
+            connection.close()
+            connection = null
+        })
+    } catch(err) {}
+}
+
+function updateConnectionScore() {
+    if (connection != null) {
+        connection.send(JSON.stringify({
+            "score": game.score
+        }))
+    }
+}
+
+function updateConnectionDead() {
+    if (connection != null) {
+        connection.send(JSON.stringify({
+            "content": `${game.pilot} has fallen!`
+        }))
+        connection.send(JSON.stringify({
+            "game_over": true
+        }))
+    }
 }
 
 //THREEJS RELATED VARIABLES
@@ -553,6 +620,7 @@ ProjectileHolder.prototype.rotateProjectiles = function () {
                 this.mesh.remove(projectile.mesh);
                 i--;
                 game.score += 50
+                updateConnectionScore()
                 break
             }
         }
@@ -574,6 +642,7 @@ Ennemy = function () {
     this.dist = 0;
     this.veloX = 0;
     this.veloY = 0;
+    this.deltaY = 0;
     this.fireVelo = false
 }
 
@@ -604,7 +673,6 @@ var ennemyTree = new SelectorNode([
         (ennemy) => {
             var diffPos = airplane.mesh.position.clone().sub(ennemy.mesh.position.clone());
             var d = diffPos.length();
-            // return false
             return (d < game.ennemyDistanceDetectPlayer) || ennemy.fireVelo
         },
         (ennemy) => {
@@ -623,9 +691,53 @@ var ennemyTree = new SelectorNode([
     ]),
     new SequenceNode([
         (ennemy) => {
+            for (let i = 0; i < projectileHolder.projectilesInUse.length; i++) {
+                var diffPos = projectileHolder.projectilesInUse[i].mesh.position.clone().sub(ennemy.mesh.position.clone());
+                var d = diffPos.length();
+                if (d < game.ennemyDistanceDetectProjectile) return true;
+            }
+
+            return false;
+        },
+        (ennemy) => {
+            let ys = []
+            for (let i = 0; i < projectileHolder.projectilesInUse.length; i++) {
+                var diffPos = projectileHolder.projectilesInUse[i].mesh.position.clone().sub(ennemy.mesh.position.clone());
+                var d = diffPos.length();
+                if (d < game.ennemyDistanceDetectProjectile && projectileHolder.projectilesInUse[i].mesh.position.x < ennemy.mesh.position.x) 
+                    ys.push(projectileHolder.projectilesInUse[i].mesh.position.y);
+            }
+
+            let curY = ennemy.mesh.position.y
+            let desY = curY
+            for (y of ys) {
+                if (Math.abs(y - curY) <= game.ennemyDistanceTolerance) {
+                    if (y != curY) { 
+                        desY += game.ennemyDistanceTolerance * game.ennemyDistanceTolerance / (curY - y)
+                    } else {
+                        desY += game.ennemyDistanceTolerance
+                    }
+                }
+            }
+
+            if (desY < curY) {
+                ennemy.deltaY += Math.max(-1, (desY - curY) * 0.1)
+            } else if (desY > curY) {
+                ennemy.deltaY += Math.min(1, (desY - curY) * 0.1)
+            }
+
             ennemy.angle += game.speed * deltaTime * game.ennemiesSpeed;
             if (ennemy.angle > Math.PI * 2) ennemy.angle -= Math.PI * 2;
-            ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle) * ennemy.distance;
+            ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle) * ennemy.distance + ennemy.deltaY;
+            ennemy.mesh.position.x = Math.cos(ennemy.angle) * ennemy.distance;
+            return true
+        }
+    ]),
+    new SequenceNode([
+        (ennemy) => {
+            ennemy.angle += game.speed * deltaTime * game.ennemiesSpeed;
+            if (ennemy.angle > Math.PI * 2) ennemy.angle -= Math.PI * 2;
+            ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle) * ennemy.distance + ennemy.deltaY;
             ennemy.mesh.position.x = Math.cos(ennemy.angle) * ennemy.distance;
             return true
         }
@@ -654,6 +766,7 @@ EnnemiesHolder.prototype.spawnEnnemies = function () {
         ennemy.mesh.position.x = Math.cos(ennemy.angle) * ennemy.distance;
         ennemy.veloX = 0
         ennemy.veloY = 0
+        ennemy.deltaY = 0
         ennemy.fireVelo = false
 
         this.mesh.add(ennemy.mesh);
@@ -665,12 +778,6 @@ EnnemiesHolder.prototype.rotateEnnemies = function () {
     for (var i = 0; i < this.ennemiesInUse.length; i++) {
         var ennemy = this.ennemiesInUse[i];
         ennemyTree(ennemy)
-        // ennemy.angle += game.speed*deltaTime*game.ennemiesSpeed;
-
-        // if (ennemy.angle > Math.PI*2) ennemy.angle -= Math.PI*2;
-
-        // ennemy.mesh.position.y = -game.seaRadius + Math.sin(ennemy.angle)*ennemy.distance;
-        // ennemy.mesh.position.x = Math.cos(ennemy.angle)*ennemy.distance;
 
         var diffPos = airplane.mesh.position.clone().sub(ennemy.mesh.position.clone());
         var d = diffPos.length();
@@ -992,6 +1099,11 @@ function loop() {
         if (Math.floor(game.distance) % game.distanceForLevelUpdate == 0 && Math.floor(game.distance) > game.levelLastUpdate) {
             game.levelLastUpdate = Math.floor(game.distance);
             game.level++;
+            if (connection != null) {
+                connection.send(JSON.stringify({
+                    "content": `${game.pilot} ascended to level ${game.level}!`
+                }))
+            }
             fieldLevel.innerHTML = Math.floor(game.level);
 
             game.targetBaseSpeed = game.initSpeed + game.incrementSpeedByLevel * game.level
@@ -1064,12 +1176,14 @@ function updateEnergy() {
 
     if (game.energy < 1) {
         game.status = "gameover";
+        updateConnectionDead()
     }
 }
 
 function addEnergy() {
     // game.energy += game.coinValue;
     game.score += game.coinValue
+    updateConnectionScore()
     game.energy = Math.min(game.energy, 100);
 }
 
